@@ -1,4 +1,5 @@
 *.png
 *.mkv
 *.mp4
+*.avi
 .venv/
