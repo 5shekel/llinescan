@@ -3,3 +3,7 @@
 *.mp4
 *.avi
 .venv/
+#demos
+!demo_changes.png
+!demo.jpg
+!line500fps32pix.mp4
