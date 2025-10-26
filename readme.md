@@ -2,7 +2,7 @@
 
 A digital implementation of **strip photography** (also called **slit photography**) that captures a two-dimensional image as a sequence of one-dimensional images over time.
 
-![demo](demo.png)
+![demo](demo.jpg)
 
 Strip photography records a moving scene over time by extracting the same line position from each video frame and assembling them into a composite image where:
 - One axis represents **space** (the slit/line being observed)
