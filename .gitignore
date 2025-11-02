@@ -3,6 +3,7 @@
 *.mp4
 *.avi
 .venv/
+results/
 #demos
 !demo_changes.png
 !demo.jpg

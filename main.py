@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+import uuid
 
 
 def calculate_line_difference(line1, line2):
@@ -132,8 +133,8 @@ def analyze_changes_only(video_path, x_column=None, y_row=None, debug_output=Non
     cap.release()
     
     if debug_output:
-        # Generate change graph
-        graph_path = f"{debug_output}_changes.png"
+        # Generate change graph (debug_output is now a Path object)
+        graph_path = debug_output.parent / f"{debug_output.stem}_changes.png"
         generate_change_graph(changes, graph_path)
         
         # Generate statistics
@@ -157,7 +158,7 @@ def analyze_changes_only(video_path, x_column=None, y_row=None, debug_output=Non
     return changes
 
 
-def extract_column_strip(video_path, x_column, output_path, change_threshold=0.01):
+def extract_column_strip(video_path, x_column, output_path, change_threshold=0.005):
     """
     Extract vertical strip at x_column from each frame of the video.
     Only include frames where the change exceeds the threshold.
@@ -310,11 +311,14 @@ def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01):
     # Convert list to numpy array
     strip_image = np.stack(significant_rows, axis=0)
     
+    # Rotate clockwise 90 degrees for row mode
+    strip_image = cv2.rotate(strip_image, cv2.ROTATE_90_CLOCKWISE)
+    
     print(f"Original frames: {total_frames}")
     print(f"Included frames: {included_frames}")
     print(f"Skipped frames: {skipped_frames}")
     print(f"Compression ratio: {skipped_frames/total_frames:.1%}")
-    print(f"Output dimensions: {strip_image.shape}")
+    print(f"Output dimensions: {strip_image.shape} (rotated 90° CW)")
     print(f"Saving to: {output_path}")
     
     # Save the strip image
@@ -339,15 +343,14 @@ def main():
     )
     
     parser.add_argument(
-        "--yrow", 
+        "--yrow",
         type=int,
-        help="Extract horizontal line at y-coordinate (row mode)"
+        help="Extract horizontal line at y-coordinate (row mode, default: 8)"
     )
     
     parser.add_argument(
         "--output",
-        required=True,
-        help="Output image file path"
+        help="Output image file path (default: results/<input_name>.jpg)"
     )
     
     parser.add_argument(
@@ -376,9 +379,10 @@ def main():
         print("Error: Cannot specify both --xcolumn and --yrow. Choose one mode.")
         sys.exit(1)
     
+    # Default to yrow=8 if neither mode specified
     if args.xcolumn is None and args.yrow is None:
-        print("Error: Must specify either --xcolumn or --yrow.")
-        sys.exit(1)
+        args.yrow = 8
+        print(f"Using default: --yrow={args.yrow}")
     
     # Validate coordinates
     if args.xcolumn is not None and args.xcolumn < 0:
@@ -394,7 +398,24 @@ def main():
         print("Error: --threshold must be between 0 and 1")
         sys.exit(1)
     
-    output_path = Path(args.output)
+    # Generate output path
+    if args.output:
+        output_path = Path(args.output)
+        # Add .jpg extension if no extension provided
+        if not output_path.suffix:
+            output_path = output_path.with_suffix('.jpg')
+            print(f"No extension specified, using: {output_path}")
+    else:
+        # Auto-generate output path in results folder with UUID
+        results_dir = Path("results")
+        results_dir.mkdir(exist_ok=True)
+        # Generate 4-character UUID prefix
+        uuid_prefix = uuid.uuid4().hex[:4]
+        # Include threshold in filename
+        threshold_str = f"t{args.threshold}".replace(".", "_")
+        output_filename = f"{video_path.stem}_{uuid_prefix}_{threshold_str}.jpg"
+        output_path = results_dir / output_filename
+        print(f"No output specified, using: {output_path}")
     
     try:
         if args.debug:
@@ -403,10 +424,10 @@ def main():
             
             if args.xcolumn is not None:
                 print(f"Column mode: Analyzing vertical line at x={args.xcolumn}")
-                analyze_changes_only(video_path, x_column=args.xcolumn, debug_output=output_path.stem)
+                analyze_changes_only(video_path, x_column=args.xcolumn, debug_output=output_path)
             else:
                 print(f"Row mode: Analyzing horizontal line at y={args.yrow}")
-                analyze_changes_only(video_path, y_row=args.yrow, debug_output=output_path.stem)
+                analyze_changes_only(video_path, y_row=args.yrow, debug_output=output_path)
             
             print("Change analysis completed successfully!")
         else:
