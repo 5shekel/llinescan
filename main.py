@@ -396,8 +396,10 @@ def main():
     parser.add_argument(
         "--relax",
         type=int,
+        nargs='?',
+        const=100,
         default=0,
-        help="Include N extra frames before/after frames exceeding threshold (default: 0)"
+        help="Include N extra frames before/after frames exceeding threshold (default: 0, or 100 if flag used without value)"
     )
     
     parser.add_argument(
