@@ -148,17 +148,26 @@ def analyze_changes_only(video_path, x_column=None, y_row=None, debug_output=Non
             
             # Suggest thresholds
             percentiles = [50, 75, 90, 95, 99]
+            threshold_values = []
             print(f"\nSuggested threshold values:")
             for p in percentiles:
                 thresh = np.percentile(changes, p)
+                threshold_values.append(thresh)
                 frames_above = np.sum(np.array(changes) >= thresh)
                 compression = (len(changes) - frames_above) / len(changes) * 100
                 print(f"  {p}th percentile: {thresh:.4f} (keeps {frames_above} frames, {compression:.1f}% compression)")
+            
+            # Generate PowerShell command to test all suggested thresholds
+            threshold_list = ",".join([f"{t:.4f}" for t in threshold_values])
+            video_path_str = str(video_path.absolute())
+            pwsh_cmd = f"{threshold_list} | %{{uv run .\\main.py {video_path_str} --threshold $_}}"
+            print(f"\nPowerShell command to test all thresholds:")
+            print(f"  {pwsh_cmd}")
     
     return changes
 
 
-def extract_column_strip(video_path, x_column, output_path, change_threshold=0.005):
+def extract_column_strip(video_path, x_column, output_path, change_threshold=0.005, relax=0):
     """
     Extract vertical strip at x_column from each frame of the video.
     Only include frames where the change exceeds the threshold.
@@ -168,6 +177,7 @@ def extract_column_strip(video_path, x_column, output_path, change_threshold=0.0
         x_column: X-coordinate of the column to extract
         output_path: Path for output image
         change_threshold: Minimum change threshold (0-1) to include frame
+        relax: Number of extra frames to include before/after threshold frames
     """
     cap = cv2.VideoCapture(str(video_path))
     
@@ -185,12 +195,13 @@ def extract_column_strip(video_path, x_column, output_path, change_threshold=0.0
     print(f"Processing {total_frames} frames...")
     print(f"Extracting column {x_column} from {frame_width}x{frame_height} frames")
     print(f"Change threshold: {change_threshold}")
+    if relax > 0:
+        print(f"Relax: including {relax} frames before/after threshold frames")
     
-    # Collect significant columns
-    significant_columns = []
+    # First pass: collect all columns and identify significant frames
+    all_columns = []
+    changes = []
     previous_column = None
-    included_frames = 0
-    skipped_frames = 0
     
     frame_idx = 0
     while True:
@@ -200,28 +211,38 @@ def extract_column_strip(video_path, x_column, output_path, change_threshold=0.0
             
         # Extract current column
         current_column = frame[:, x_column, :].copy()
+        all_columns.append(current_column)
         
-        # Check if this is the first frame or if change is significant
-        include_frame = False
-        if previous_column is None:
-            include_frame = True  # Always include first frame
-        else:
+        # Calculate change from previous frame
+        if previous_column is not None:
             change = calculate_line_difference(current_column, previous_column)
-            if change >= change_threshold:
-                include_frame = True
-        
-        if include_frame:
-            significant_columns.append(current_column)
-            previous_column = current_column
-            included_frames += 1
+            changes.append(change)
         else:
-            skipped_frames += 1
+            changes.append(0)  # First frame has no change
         
+        previous_column = current_column
         frame_idx += 1
+        
         if frame_idx % 100 == 0:
             print(f"Processed {frame_idx}/{total_frames} frames")
     
     cap.release()
+    
+    # Second pass: determine which frames to include
+    include_mask = [False] * len(all_columns)
+    
+    for i, change in enumerate(changes):
+        if i == 0 or change >= change_threshold:
+            # Mark this frame and surrounding frames
+            start = max(0, i - relax)
+            end = min(len(all_columns), i + relax + 1)
+            for j in range(start, end):
+                include_mask[j] = True
+    
+    # Collect significant columns
+    significant_columns = [col for i, col in enumerate(all_columns) if include_mask[i]]
+    included_frames = sum(include_mask)
+    skipped_frames = len(all_columns) - included_frames
     
     if not significant_columns:
         raise ValueError("No significant changes detected. Try lowering the threshold.")
@@ -240,7 +261,7 @@ def extract_column_strip(video_path, x_column, output_path, change_threshold=0.0
     cv2.imwrite(str(output_path), strip_image)
 
 
-def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01):
+def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01, relax=0):
     """
     Extract horizontal strip at y_row from each frame of the video.
     Only include frames where the change exceeds the threshold.
@@ -250,6 +271,7 @@ def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01):
         y_row: Y-coordinate of the row to extract
         output_path: Path for output image
         change_threshold: Minimum change threshold (0-1) to include frame
+        relax: Number of extra frames to include before/after threshold frames
     """
     cap = cv2.VideoCapture(str(video_path))
     
@@ -267,12 +289,13 @@ def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01):
     print(f"Processing {total_frames} frames...")
     print(f"Extracting row {y_row} from {frame_width}x{frame_height} frames")
     print(f"Change threshold: {change_threshold}")
+    if relax > 0:
+        print(f"Relax: including {relax} frames before/after threshold frames")
     
-    # Collect significant rows
-    significant_rows = []
+    # First pass: collect all rows and identify significant frames
+    all_rows = []
+    changes = []
     previous_row = None
-    included_frames = 0
-    skipped_frames = 0
     
     frame_idx = 0
     while True:
@@ -282,28 +305,38 @@ def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01):
             
         # Extract current row
         current_row = frame[y_row, :, :].copy()
+        all_rows.append(current_row)
         
-        # Check if this is the first frame or if change is significant
-        include_frame = False
-        if previous_row is None:
-            include_frame = True  # Always include first frame
-        else:
+        # Calculate change from previous frame
+        if previous_row is not None:
             change = calculate_line_difference(current_row, previous_row)
-            if change >= change_threshold:
-                include_frame = True
-        
-        if include_frame:
-            significant_rows.append(current_row)
-            previous_row = current_row
-            included_frames += 1
+            changes.append(change)
         else:
-            skipped_frames += 1
+            changes.append(0)  # First frame has no change
         
+        previous_row = current_row
         frame_idx += 1
+        
         if frame_idx % 100 == 0:
             print(f"Processed {frame_idx}/{total_frames} frames")
     
     cap.release()
+    
+    # Second pass: determine which frames to include
+    include_mask = [False] * len(all_rows)
+    
+    for i, change in enumerate(changes):
+        if i == 0 or change >= change_threshold:
+            # Mark this frame and surrounding frames
+            start = max(0, i - relax)
+            end = min(len(all_rows), i + relax + 1)
+            for j in range(start, end):
+                include_mask[j] = True
+    
+    # Collect significant rows
+    significant_rows = [row for i, row in enumerate(all_rows) if include_mask[i]]
+    included_frames = sum(include_mask)
+    skipped_frames = len(all_rows) - included_frames
     
     if not significant_rows:
         raise ValueError("No significant changes detected. Try lowering the threshold.")
@@ -361,6 +394,13 @@ def main():
     )
     
     parser.add_argument(
+        "--relax",
+        type=int,
+        default=0,
+        help="Include N extra frames before/after frames exceeding threshold (default: 0)"
+    )
+    
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Debug mode: analyze changes and generate threshold graph without creating strip image"
@@ -407,8 +447,11 @@ def main():
             print(f"No extension specified, using: {output_path}")
     else:
         # Auto-generate output path in results folder with UUID
-        results_dir = Path("results")
-        results_dir.mkdir(exist_ok=True)
+        if args.debug:
+            results_dir = Path("results/debug")
+        else:
+            results_dir = Path("results")
+        results_dir.mkdir(parents=True, exist_ok=True)
         # Generate 4-character UUID prefix
         uuid_prefix = uuid.uuid4().hex[:4]
         # Include threshold in filename
@@ -434,10 +477,10 @@ def main():
             # Normal mode: extract strip photography
             if args.xcolumn is not None:
                 print(f"Column mode: Extracting vertical line at x={args.xcolumn}")
-                extract_column_strip(video_path, args.xcolumn, output_path, args.threshold)
+                extract_column_strip(video_path, args.xcolumn, output_path, args.threshold, args.relax)
             else:
                 print(f"Row mode: Extracting horizontal line at y={args.yrow}")
-                extract_row_strip(video_path, args.yrow, output_path, args.threshold)
+                extract_row_strip(video_path, args.yrow, output_path, args.threshold, args.relax)
             
             print("Strip photography extraction completed successfully!")
         
