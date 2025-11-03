@@ -185,7 +185,7 @@ def analyze_changes_only(video_path, x_column=None, y_row=None, debug_output=Non
 
 def add_timeline_overlay(image, frame_numbers):
     """
-    Add frame number overlay as a timeline/ruler at the top of the image.
+    Add frame number overlay as a timeline/ruler at the bottom of the image.
     Always horizontal from left to right.
     
     Args:
@@ -207,9 +207,10 @@ def add_timeline_overlay(image, frame_numbers):
     # Calculate text size for spacing
     (text_width, text_height), _ = cv2.getTextSize("00000", font, font_scale, font_thickness)
     
-    # Horizontal timeline at the top from left to right
+    # Horizontal timeline at the bottom from left to right
     # Calculate spacing to avoid overlap
     available_width = image.shape[1]
+    image_height = image.shape[0]
     num_labels = min(len(frame_numbers), max(10, available_width // (text_width + 10)))
     step = max(1, len(frame_numbers) // num_labels)
     
@@ -218,10 +219,10 @@ def add_timeline_overlay(image, frame_numbers):
         text = str(frame_num)
         x_pos = int((i / len(frame_numbers)) * available_width)
         
-        # Add small tick mark
-        cv2.line(overlay, (x_pos, 0), (x_pos, 10), text_color, 1)
-        # Add text
-        cv2.putText(overlay, text, (x_pos + 2, text_height + 12),
+        # Add small tick mark at bottom
+        cv2.line(overlay, (x_pos, image_height - 10), (x_pos, image_height), text_color, 1)
+        # Add text above tick mark
+        cv2.putText(overlay, text, (x_pos + 2, image_height - 12),
                    font, font_scale, text_color, font_thickness, cv2.LINE_AA)
     
     return overlay
