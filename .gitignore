@@ -4,6 +4,7 @@
 *.avi
 .venv/
 results/
+data/
 #demos
 !demo_changes.png
 !demo.jpg
