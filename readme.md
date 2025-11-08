@@ -2,7 +2,7 @@
 
 A digital implementation of **strip photography** (also called **slit photography**) that captures a two-dimensional image as a sequence of one-dimensional images over time.
 
-![demo](demo2.jpg)
+![demo](images/demo2.jpg)
 
 Strip photography records a moving scene over time by extracting the same line position from each video frame and assembling them into a composite image where:
 - One axis represents **space** (the slit/line being observed)
@@ -61,7 +61,7 @@ uv run main.py .\line500fps32pix.mp4 --video --alpha --no-parallel
 uv run main.py .\line500fps32pix.mp4 --debug
 ```
 Output: `results/debug/line500fps32pix_7c91_t0_01_changes.png`
-![debug view](demo_changes2.jpg)
+![debug view](images/demo_changes2.jpg)
 
 Debug mode generates PowerShell commands to test all suggested thresholds:
 ```powershell
