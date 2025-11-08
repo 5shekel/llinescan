@@ -628,16 +628,16 @@ def extract_column_strip_video(video_path, x_column, output_path, change_thresho
     print(f"Compression ratio: {skipped_frames/len(all_columns):.1%}")
     
     # Create video writer
-    # Output video dimensions: height = input frame height, width = number of significant frames
-    output_width = len(significant_columns)
-    output_height = frame_height
+    # Output video dimensions: height = input frame height, width = number of significant frames (final)
+    final_output_width = len(significant_columns)
+    final_output_height = frame_height
     
-    print(f"Output video dimensions: {output_width}x{output_height}")
+    print(f"Output video dimensions: {final_output_width}x{final_output_height}")
     print(f"Creating MJPEG video at {fps} FPS: {output_path}")
     
     # Define the codec and create VideoWriter object
     fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (output_width, output_height))
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (final_output_width, final_output_height))
     
     if not out.isOpened():
         raise ValueError(f"Could not create video writer for: {output_path}")
@@ -647,14 +647,19 @@ def extract_column_strip_video(video_path, x_column, output_path, change_thresho
         # Create accumulated strip image up to current frame
         accumulated_columns = significant_columns[:frame_idx + 1]
         
-        # If we have fewer columns than the final width, pad with the last column
-        while len(accumulated_columns) < output_width:
-            accumulated_columns.append(accumulated_columns[-1])
-        
         # Convert to numpy array and create the frame
         strip_frame = np.stack(accumulated_columns, axis=1)
         
-        # Add timestamp overlay if requested
+        # Pad the frame to match the final video dimensions
+        current_height, current_width = strip_frame.shape[:2]
+        if current_width < final_output_width or current_height < final_output_height:
+            # Create a black frame of the final size
+            padded_frame = np.zeros((final_output_height, final_output_width, 3), dtype=strip_frame.dtype)
+            # Copy the current frame to the left side (for progressive width growth)
+            padded_frame[:current_height, :current_width] = strip_frame
+            strip_frame = padded_frame
+        
+        # Add timestamp overlay if requested (after padding)
         if timestamp:
             strip_frame = add_timestamp_overlay(strip_frame, frame_idx + 1, len(significant_columns))
         
@@ -784,17 +789,18 @@ def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.0
     
     # Create video writer
     # For row mode, we rotate CCW 90°: output video dimensions after rotation
-    # Before rotation: height = number of significant frames, width = input frame width
-    # After rotation: height = input frame width, width = number of significant frames
-    output_width = len(significant_rows)  # After rotation
-    output_height = frame_width  # After rotation
+    # Before rotation: height = frame_idx + 1 (progressive), width = input frame width
+    # After rotation: height = input frame width, width = frame_idx + 1 (progressive)
+    # We'll set dimensions to the final size for the video container
+    final_output_width = len(significant_rows)  # After rotation
+    final_output_height = frame_width  # After rotation
     
-    print(f"Output video dimensions (after rotation): {output_width}x{output_height}")
+    print(f"Output video dimensions (after rotation): {final_output_width}x{final_output_height}")
     print(f"Creating MJPEG video at {fps} FPS: {output_path}")
     
     # Define the codec and create VideoWriter object
     fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (output_width, output_height))
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (final_output_width, final_output_height))
     
     if not out.isOpened():
         raise ValueError(f"Could not create video writer for: {output_path}")
@@ -804,17 +810,22 @@ def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.0
         # Create accumulated strip image up to current frame
         accumulated_rows = significant_rows[:frame_idx + 1]
         
-        # If we have fewer rows than the final height, pad with the last row
-        while len(accumulated_rows) < output_height:
-            accumulated_rows.append(accumulated_rows[-1])
-        
         # Convert to numpy array and create the frame
         strip_frame = np.stack(accumulated_rows, axis=0)
         
         # Rotate counter-clockwise 90 degrees to match image mode orientation
         strip_frame = cv2.rotate(strip_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
-        # Add timestamp overlay if requested (after rotation)
+        # Pad the frame to match the final video dimensions
+        current_height, current_width = strip_frame.shape[:2]
+        if current_width < final_output_width or current_height < final_output_height:
+            # Create a black frame of the final size
+            padded_frame = np.zeros((final_output_height, final_output_width, 3), dtype=strip_frame.dtype)
+            # Copy the current frame to the left side (for progressive width growth)
+            padded_frame[:current_height, :current_width] = strip_frame
+            strip_frame = padded_frame
+        
+        # Add timestamp overlay if requested (after padding)
         if timestamp:
             strip_frame = add_timestamp_overlay(strip_frame, frame_idx + 1, len(significant_rows))
         
