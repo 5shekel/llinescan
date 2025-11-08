@@ -14,6 +14,221 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import uuid
 import math
+import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import threading
+from functools import partial
+from tqdm import tqdm
+
+
+def process_frame_batch(video_path, start_idx, end_idx, x_column=None, y_row=None):
+    """
+    Process a batch of frames in parallel.
+    
+    Args:
+        video_path: Path to video file
+        start_idx: Starting frame index
+        end_idx: Ending frame index (exclusive)
+        x_column: X-coordinate for column extraction
+        y_row: Y-coordinate for row extraction
+        
+    Returns:
+        List of (frame_idx, extracted_line) tuples
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return []
+    
+    # Seek to start frame
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+    
+    results = []
+    for frame_idx in range(start_idx, end_idx):
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        # Extract line based on mode
+        if x_column is not None:
+            line = frame[:, x_column, :].copy()
+        else:
+            line = frame[y_row, :, :].copy()
+            
+        results.append((frame_idx, line))
+    
+    cap.release()
+    return results
+
+
+def calculate_changes_parallel(lines_with_indices, num_workers=None):
+    """
+    Calculate changes between consecutive lines in parallel.
+    
+    Args:
+        lines_with_indices: List of (frame_idx, line) tuples
+        num_workers: Number of worker processes
+        
+    Returns:
+        List of (frame_idx, change_value) tuples
+    """
+    if num_workers is None:
+        num_workers = min(mp.cpu_count(), 8)
+    
+    if len(lines_with_indices) < 2:
+        return []
+    
+    # Prepare pairs for parallel processing
+    pairs = []
+    for i in range(1, len(lines_with_indices)):
+        prev_idx, prev_line = lines_with_indices[i-1]
+        curr_idx, curr_line = lines_with_indices[i]
+        pairs.append((curr_idx, prev_line, curr_line))
+    
+    # Process in parallel with progress bar
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        change_func = partial(_calculate_single_change)
+        results = list(tqdm(
+            executor.map(change_func, pairs),
+            total=len(pairs),
+            desc="Calculating changes",
+            unit="pair"
+        ))
+    
+    return results
+
+
+def _calculate_single_change(pair):
+    """Helper function for parallel change calculation."""
+    frame_idx, prev_line, curr_line = pair
+    change = calculate_line_difference(curr_line, prev_line)
+    return (frame_idx, change)
+
+
+def _process_batch_wrapper(args):
+    """Wrapper function for process_frame_batch to avoid lambda pickling issues."""
+    video_path, start_idx, end_idx, x_column, y_row = args
+    return process_frame_batch(video_path, start_idx, end_idx, x_column, y_row)
+
+
+def write_png_frame_parallel(args):
+    """
+    Write a single PNG frame with alpha channel in parallel with error handling.
+    
+    Args:
+        args: Tuple of (frame_data, output_path, frame_idx, total_frames, timestamp)
+    """
+    import time
+    frame_data, output_path, frame_idx, total_frames, timestamp = args
+    
+    # Add timestamp overlay if requested
+    if timestamp:
+        # Convert back to BGR for timestamp overlay, then back to BGRA
+        bgr_for_timestamp = frame_data[:, :, :3].copy()
+        bgr_with_timestamp = add_timestamp_overlay(bgr_for_timestamp, frame_idx + 1, total_frames)
+        frame_data[:, :, :3] = bgr_with_timestamp
+    
+    # Save PNG frame with zero-padded frame number and retry logic
+    frame_filename = f"frame_{frame_idx:06d}.png"
+    frame_path = output_path / frame_filename
+    
+    # Retry mechanism for write failures
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            success = cv2.imwrite(str(frame_path), frame_data)
+            if success:
+                return frame_idx
+            else:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))  # Progressive delay
+                    continue
+                else:
+                    print(f"Warning: Failed to write frame {frame_idx} after {max_retries} attempts")
+                    return -frame_idx  # Return negative to indicate failure
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))  # Progressive delay
+                continue
+            else:
+                print(f"Error writing frame {frame_idx}: {e}")
+                return -frame_idx  # Return negative to indicate failure
+    
+    return -frame_idx  # Should not reach here, but return failure indicator
+
+
+def prepare_and_write_png_batch(args):
+    """
+    Prepare and write a batch of PNG frames in parallel.
+    
+    Args:
+        args: Tuple of (significant_data, output_dir, start_idx, end_idx, final_dims, timestamp, mode)
+    """
+    significant_data, output_dir, start_idx, end_idx, final_dims, timestamp, mode = args
+    final_output_height, final_output_width = final_dims
+    
+    results = []
+    for frame_idx in range(start_idx, end_idx):
+        if frame_idx >= len(significant_data):
+            break
+            
+        # Create accumulated strip image up to current frame
+        if mode == 'column':
+            accumulated_data = significant_data[:frame_idx + 1]
+            strip_frame_bgr = np.stack(accumulated_data, axis=1)
+            strip_frame_bgr = cv2.flip(strip_frame_bgr, 1)
+        else:  # row mode
+            accumulated_data = significant_data[:frame_idx + 1]
+            strip_frame_bgr = np.stack(accumulated_data, axis=0)
+            strip_frame_bgr = cv2.rotate(strip_frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            strip_frame_bgr = cv2.flip(strip_frame_bgr, 1)
+        
+        # Create BGRA frame with alpha channel
+        current_height, current_width = strip_frame_bgr.shape[:2]
+        strip_frame_bgra = np.zeros((final_output_height, final_output_width, 4), dtype=np.uint8)
+        
+        # Copy RGB data and set alpha
+        strip_frame_bgra[:current_height, final_output_width-current_width:, :3] = strip_frame_bgr
+        strip_frame_bgra[:current_height, final_output_width-current_width:, 3] = 255
+        
+        # Add timestamp overlay if requested
+        if timestamp:
+            bgr_for_timestamp = strip_frame_bgra[:, :, :3].copy()
+            bgr_with_timestamp = add_timestamp_overlay(bgr_for_timestamp, frame_idx + 1, len(significant_data))
+            strip_frame_bgra[:, :, :3] = bgr_with_timestamp
+        
+        # Save PNG frame
+        frame_filename = f"frame_{frame_idx:06d}.png"
+        frame_path = output_dir / frame_filename
+        
+        # Retry mechanism for write failures
+        max_retries = 3
+        success = False
+        for attempt in range(max_retries):
+            try:
+                write_success = cv2.imwrite(str(frame_path), strip_frame_bgra)
+                if write_success:
+                    success = True
+                    break
+                else:
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(0.1 * (attempt + 1))  # Progressive delay
+                        continue
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(0.1 * (attempt + 1))  # Progressive delay
+                    continue
+                else:
+                    print(f"Error writing frame {frame_idx}: {e}")
+        
+        if success:
+            results.append(frame_idx)
+        else:
+            print(f"Warning: Failed to write frame {frame_idx} after {max_retries} attempts")
+            results.append(-frame_idx)  # Negative indicates failure
+    
+    return results
 
 
 def calculate_line_difference(line1, line2):
@@ -855,7 +1070,7 @@ def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.0
     print(f"Total duration: {len(significant_rows)/fps:.2f} seconds")
 
 
-def extract_column_strip_alpha(video_path, x_column, output_path, change_threshold=0.005, relax=0, start_frame=0, end_frame=None, fps=30, timestamp=False):
+def extract_column_strip_alpha(video_path, x_column, output_path, change_threshold=0.005, relax=0, start_frame=0, end_frame=None, fps=30, timestamp=False, parallel=True, num_workers=None):
     """
     Extract vertical strip at x_column from each frame and create PNG sequence with alpha transparency.
     Each frame shows the accumulated scan lines up to that point with transparent background.
@@ -870,6 +1085,8 @@ def extract_column_strip_alpha(video_path, x_column, output_path, change_thresho
         end_frame: Last frame to process (None = until end)
         fps: Output video frame rate (for reference)
         timestamp: If True, embed frame count on bottom left corner
+        parallel: If True, use parallel processing for better performance
+        num_workers: Number of worker processes (None = auto-detect)
     """
     cap = cv2.VideoCapture(str(video_path))
     
@@ -880,6 +1097,7 @@ def extract_column_strip_alpha(video_path, x_column, output_path, change_thresho
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
     
     if x_column >= frame_width:
         raise ValueError(f"Column {x_column} is outside video width ({frame_width})")
@@ -893,47 +1111,100 @@ def extract_column_strip_alpha(video_path, x_column, output_path, change_thresho
     print(f"Change threshold: {change_threshold}")
     if relax > 0:
         print(f"Relax: including {relax} frames before/after threshold frames")
-    
-    # First pass: collect all columns and identify significant frames
-    all_columns = []
-    changes = []
-    frame_numbers = []
-    previous_column = None
-    
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    if parallel:
+        actual_workers = num_workers or mp.cpu_count()
+        print(f"Using parallel processing with {actual_workers} workers")
         
-        # Skip frames before start
-        if frame_idx < start_frame:
-            frame_idx += 1
-            continue
+        # Provide optimization hints for large datasets
+        if (end_frame - start_frame + 1) > 5000:
+            optimal_workers = min(mp.cpu_count(), 8)
+            if actual_workers < optimal_workers:
+                print(f"💡 Tip: For large datasets ({end_frame - start_frame + 1} frames), consider using --workers {optimal_workers} for better performance")
+    
+    if parallel and (end_frame - start_frame + 1) > 100:
+        # Use parallel processing for large frame counts
+        if num_workers is None:
+            num_workers = min(mp.cpu_count(), 8)
         
-        # Stop after end frame
-        if frame_idx > end_frame:
-            break
+        # Process frames in parallel batches
+        batch_size = max(50, (end_frame - start_frame + 1) // (num_workers * 4))
+        batches = []
+        
+        for batch_start in range(start_frame, end_frame + 1, batch_size):
+            batch_end = min(batch_start + batch_size, end_frame + 1)
+            batches.append((batch_start, batch_end))
+        
+        print(f"Processing {len(batches)} batches of ~{batch_size} frames each")
+        
+        # Process batches in parallel with progress bar
+        batch_args = [(video_path, b[0], b[1], x_column, None) for b in batches]
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            batch_results = list(tqdm(
+                executor.map(_process_batch_wrapper, batch_args),
+                total=len(batch_args),
+                desc="Processing frame batches",
+                unit="batch"
+            ))
+        
+        # Flatten results and sort by frame index
+        all_lines_with_indices = []
+        for batch_result in batch_results:
+            all_lines_with_indices.extend(batch_result)
+        all_lines_with_indices.sort(key=lambda x: x[0])
+        
+        # Calculate changes in parallel
+        print("Calculating frame changes in parallel...")
+        change_results = calculate_changes_parallel(all_lines_with_indices, num_workers)
+        
+        # Convert to lists for compatibility
+        all_columns = [line for _, line in all_lines_with_indices]
+        frame_numbers = [idx for idx, _ in all_lines_with_indices]
+        changes = [0]  # First frame has no change
+        changes.extend([change for _, change in sorted(change_results)])
+        
+    else:
+        # Use sequential processing for small frame counts or when parallel is disabled
+        print("Using sequential processing...")
+        cap = cv2.VideoCapture(str(video_path))
+        all_columns = []
+        changes = []
+        frame_numbers = []
+        previous_column = None
+        
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
             
-        # Extract current column
-        current_column = frame[:, x_column, :].copy()
-        all_columns.append(current_column)
-        frame_numbers.append(frame_idx)
+            # Skip frames before start
+            if frame_idx < start_frame:
+                frame_idx += 1
+                continue
+            
+            # Stop after end frame
+            if frame_idx > end_frame:
+                break
+                
+            # Extract current column
+            current_column = frame[:, x_column, :].copy()
+            all_columns.append(current_column)
+            frame_numbers.append(frame_idx)
+            
+            # Calculate change from previous frame
+            if previous_column is not None:
+                change = calculate_line_difference(current_column, previous_column)
+                changes.append(change)
+            else:
+                changes.append(0)  # First frame has no change
+            
+            previous_column = current_column
+            frame_idx += 1
+            
+            # Progress is handled by tqdm below
+            pass
         
-        # Calculate change from previous frame
-        if previous_column is not None:
-            change = calculate_line_difference(current_column, previous_column)
-            changes.append(change)
-        else:
-            changes.append(0)  # First frame has no change
-        
-        previous_column = current_column
-        frame_idx += 1
-        
-        if (frame_idx - start_frame) % 100 == 0:
-            print(f"Processed {frame_idx - start_frame}/{end_frame - start_frame + 1} frames")
-    
-    cap.release()
+        cap.release()
     
     # Second pass: determine which frames to include
     include_mask = [False] * len(all_columns)
@@ -966,7 +1237,6 @@ def extract_column_strip_alpha(video_path, x_column, output_path, change_thresho
     print(f"Compression ratio: {skipped_frames/len(all_columns):.1%}")
     
     # Create output directory
-    # For column mode: width = number of significant frames, height = input frame height
     final_output_width = len(significant_columns)
     final_output_height = frame_height
     
@@ -976,41 +1246,98 @@ def extract_column_strip_alpha(video_path, x_column, output_path, change_thresho
     print(f"Output PNG sequence dimensions: {final_output_width}x{final_output_height}")
     print(f"Creating PNG sequence at {fps} FPS reference: {output_dir}")
     
-    # Generate PNG frames - each frame shows accumulated scan lines up to that point
-    for frame_idx in range(len(significant_columns)):
-        # Create accumulated strip image up to current frame
-        accumulated_columns = significant_columns[:frame_idx + 1]
+    # Generate PNG frames with parallel writing
+    if parallel and len(significant_columns) > 50:
+        print("Generating PNG frames in parallel...")
         
-        # Convert to numpy array and create the frame with alpha channel
-        strip_frame_bgr = np.stack(accumulated_columns, axis=1)
+        # Use batched approach for better memory efficiency and parallelization
+        # Keep batch size reasonable to avoid memory issues with large datasets
+        batch_size = min(100, max(50, len(significant_columns) // (num_workers or mp.cpu_count()) // 4))
+        batches = []
         
-        # Flip horizontally so time flows from right to left (strip photography convention)
-        strip_frame_bgr = cv2.flip(strip_frame_bgr, 1)
+        for start_idx in range(0, len(significant_columns), batch_size):
+            end_idx = min(start_idx + batch_size, len(significant_columns))
+            batches.append((significant_columns, output_dir, start_idx, end_idx,
+                          (final_output_height, final_output_width), timestamp, 'column'))
         
-        # Create BGRA frame with alpha channel
-        current_height, current_width = strip_frame_bgr.shape[:2]
-        strip_frame_bgra = np.zeros((final_output_height, final_output_width, 4), dtype=np.uint8)
+        print(f"Processing {len(batches)} batches of ~{batch_size} frames each")
         
-        # Copy RGB data to BGR channels and set alpha to 255 for actual content
-        # Place content on the right side for progressive growth from right to left
-        strip_frame_bgra[:current_height, final_output_width-current_width:, :3] = strip_frame_bgr
-        strip_frame_bgra[:current_height, final_output_width-current_width:, 3] = 255  # Opaque for content
-        # Transparent areas remain alpha=0
+        # Process batches in parallel
+        with ProcessPoolExecutor(max_workers=min(num_workers or mp.cpu_count(), len(batches))) as executor:
+            batch_results = list(tqdm(
+                executor.map(prepare_and_write_png_batch, batches),
+                total=len(batches),
+                desc="Writing PNG batches",
+                unit="batch"
+            ))
         
-        # Add timestamp overlay if requested (after alpha setup)
-        if timestamp:
-            # Convert back to BGR for timestamp overlay, then back to BGRA
-            bgr_for_timestamp = strip_frame_bgra[:, :, :3].copy()
-            bgr_with_timestamp = add_timestamp_overlay(bgr_for_timestamp, frame_idx + 1, len(significant_columns))
-            strip_frame_bgra[:, :, :3] = bgr_with_timestamp
+        # Flatten results and count successes/failures
+        all_results = []
+        for batch_result in batch_results:
+            all_results.extend(batch_result)
         
-        # Save PNG frame with zero-padded frame number
-        frame_filename = f"frame_{frame_idx:06d}.png"
-        frame_path = output_dir / frame_filename
-        cv2.imwrite(str(frame_path), strip_frame_bgra)
+        successful_frames = [r for r in all_results if r >= 0]
+        failed_frames = [abs(r) for r in all_results if r < 0]
         
-        if (frame_idx + 1) % 100 == 0:
-            print(f"Generated {frame_idx + 1}/{len(significant_columns)} PNG frames")
+        print(f"Generated {len(successful_frames)} PNG frames successfully")
+        if failed_frames:
+            print(f"⚠️  Failed to write {len(failed_frames)} frames: {failed_frames[:10]}{'...' if len(failed_frames) > 10 else ''}")
+        
+    else:
+        # Sequential PNG generation for small frame counts
+        print("Generating PNG frames sequentially...")
+        for frame_idx in tqdm(range(len(significant_columns)), desc="Writing PNG frames", unit="frame"):
+            # Create accumulated strip image up to current frame
+            accumulated_columns = significant_columns[:frame_idx + 1]
+            
+            # Convert to numpy array and create the frame with alpha channel
+            strip_frame_bgr = np.stack(accumulated_columns, axis=1)
+            
+            # Flip horizontally so time flows from right to left
+            strip_frame_bgr = cv2.flip(strip_frame_bgr, 1)
+            
+            # Create BGRA frame with alpha channel
+            current_height, current_width = strip_frame_bgr.shape[:2]
+            strip_frame_bgra = np.zeros((final_output_height, final_output_width, 4), dtype=np.uint8)
+            
+            # Copy RGB data to BGR channels and set alpha to 255 for actual content
+            strip_frame_bgra[:current_height, final_output_width-current_width:, :3] = strip_frame_bgr
+            strip_frame_bgra[:current_height, final_output_width-current_width:, 3] = 255
+            
+            # Add timestamp overlay if requested
+            if timestamp:
+                bgr_for_timestamp = strip_frame_bgra[:, :, :3].copy()
+                bgr_with_timestamp = add_timestamp_overlay(bgr_for_timestamp, frame_idx + 1, len(significant_columns))
+                strip_frame_bgra[:, :, :3] = bgr_with_timestamp
+            
+            # Save PNG frame
+            frame_filename = f"frame_{frame_idx:06d}.png"
+            frame_path = output_dir / frame_filename
+            
+            # Add error handling for sequential writes too
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    success = cv2.imwrite(str(frame_path), strip_frame_bgra)
+                    if success:
+                        break
+                    else:
+                        if attempt < max_retries - 1:
+                            import time
+                            time.sleep(0.1 * (attempt + 1))
+                            continue
+                        else:
+                            print(f"Warning: Failed to write frame {frame_idx} after {max_retries} attempts")
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    else:
+                        print(f"Error writing frame {frame_idx}: {e}")
+            
+            # Progress handled by tqdm wrapper below
+            pass
     
     print(f"PNG sequence saved to: {output_dir}")
     print(f"Sequence contains {len(significant_columns)} frames at {fps} FPS reference")
@@ -1018,7 +1345,7 @@ def extract_column_strip_alpha(video_path, x_column, output_path, change_thresho
     print(f"Import into video editor as PNG sequence at {fps} FPS")
 
 
-def extract_row_strip_alpha(video_path, y_row, output_path, change_threshold=0.01, relax=0, start_frame=0, end_frame=None, fps=30, timestamp=False):
+def extract_row_strip_alpha(video_path, y_row, output_path, change_threshold=0.01, relax=0, start_frame=0, end_frame=None, fps=30, timestamp=False, parallel=True, num_workers=None):
     """
     Extract horizontal strip at y_row from each frame and create PNG sequence with alpha transparency.
     Each frame shows the accumulated scan lines up to that point with transparent background.
@@ -1033,6 +1360,8 @@ def extract_row_strip_alpha(video_path, y_row, output_path, change_threshold=0.0
         end_frame: Last frame to process (None = until end)
         fps: Output video frame rate (for reference)
         timestamp: If True, embed frame count on bottom left corner
+        parallel: If True, use parallel processing for better performance
+        num_workers: Number of worker processes (None = auto-detect)
     """
     cap = cv2.VideoCapture(str(video_path))
     
@@ -1043,6 +1372,7 @@ def extract_row_strip_alpha(video_path, y_row, output_path, change_threshold=0.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
     
     if y_row >= frame_height:
         raise ValueError(f"Row {y_row} is outside video height ({frame_height})")
@@ -1056,47 +1386,100 @@ def extract_row_strip_alpha(video_path, y_row, output_path, change_threshold=0.0
     print(f"Change threshold: {change_threshold}")
     if relax > 0:
         print(f"Relax: including {relax} frames before/after threshold frames")
+    if parallel:
+        actual_workers = num_workers or mp.cpu_count()
+        print(f"Using parallel processing with {actual_workers} workers")
+        
+        # Provide optimization hints for large datasets
+        if (end_frame - start_frame + 1) > 5000:
+            optimal_workers = min(mp.cpu_count(), 8)
+            if actual_workers < optimal_workers:
+                print(f"💡 Tip: For large datasets ({end_frame - start_frame + 1} frames), consider using --workers {optimal_workers} for better performance")
     
-    # First pass: collect all rows and identify significant frames
-    all_rows = []
-    changes = []
-    frame_numbers = []
-    previous_row = None
-    
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    if parallel and (end_frame - start_frame + 1) > 100:
+        # Use parallel processing for large frame counts
+        if num_workers is None:
+            num_workers = min(mp.cpu_count(), 8)
         
-        # Skip frames before start
-        if frame_idx < start_frame:
-            frame_idx += 1
-            continue
+        # Process frames in parallel batches
+        batch_size = max(50, (end_frame - start_frame + 1) // (num_workers * 4))
+        batches = []
         
-        # Stop after end frame
-        if frame_idx > end_frame:
-            break
-            
-        # Extract current row
-        current_row = frame[y_row, :, :].copy()
-        all_rows.append(current_row)
-        frame_numbers.append(frame_idx)
+        for batch_start in range(start_frame, end_frame + 1, batch_size):
+            batch_end = min(batch_start + batch_size, end_frame + 1)
+            batches.append((batch_start, batch_end))
         
-        # Calculate change from previous frame
-        if previous_row is not None:
-            change = calculate_line_difference(current_row, previous_row)
-            changes.append(change)
-        else:
-            changes.append(0)  # First frame has no change
+        print(f"Processing {len(batches)} batches of ~{batch_size} frames each")
         
-        previous_row = current_row
-        frame_idx += 1
+        # Process batches in parallel with progress bar
+        batch_args = [(video_path, b[0], b[1], None, y_row) for b in batches]
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            batch_results = list(tqdm(
+                executor.map(_process_batch_wrapper, batch_args),
+                total=len(batch_args),
+                desc="Processing frame batches",
+                unit="batch"
+            ))
         
-        if (frame_idx - start_frame) % 100 == 0:
-            print(f"Processed {frame_idx - start_frame}/{end_frame - start_frame + 1} frames")
-    
-    cap.release()
+        # Flatten results and sort by frame index
+        all_lines_with_indices = []
+        for batch_result in batch_results:
+            all_lines_with_indices.extend(batch_result)
+        all_lines_with_indices.sort(key=lambda x: x[0])
+        
+        # Calculate changes in parallel
+        print("Calculating frame changes in parallel...")
+        change_results = calculate_changes_parallel(all_lines_with_indices, num_workers)
+        
+        # Convert to lists for compatibility
+        all_rows = [line for _, line in all_lines_with_indices]
+        frame_numbers = [idx for idx, _ in all_lines_with_indices]
+        changes = [0]  # First frame has no change
+        changes.extend([change for _, change in sorted(change_results)])
+        
+    else:
+        # Use sequential processing for small frame counts or when parallel is disabled
+        print("Using sequential processing...")
+        cap = cv2.VideoCapture(str(video_path))
+        all_rows = []
+        changes = []
+        frame_numbers = []
+        previous_row = None
+        
+        total_frames = end_frame - start_frame + 1
+        with tqdm(total=total_frames, desc="Processing frames", unit="frame") as pbar:
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Skip frames before start
+                if frame_idx < start_frame:
+                    frame_idx += 1
+                    continue
+                
+                # Stop after end frame
+                if frame_idx > end_frame:
+                    break
+                    
+                # Extract current row
+                current_row = frame[y_row, :, :].copy()
+                all_rows.append(current_row)
+                frame_numbers.append(frame_idx)
+                
+                # Calculate change from previous frame
+                if previous_row is not None:
+                    change = calculate_line_difference(current_row, previous_row)
+                    changes.append(change)
+                else:
+                    changes.append(0)  # First frame has no change
+                
+                previous_row = current_row
+                frame_idx += 1
+                pbar.update(1)
+        
+        cap.release()
     
     # Second pass: determine which frames to include
     include_mask = [False] * len(all_rows)
@@ -1138,44 +1521,93 @@ def extract_row_strip_alpha(video_path, y_row, output_path, change_threshold=0.0
     print(f"Output PNG sequence dimensions (after rotation): {final_output_width}x{final_output_height}")
     print(f"Creating PNG sequence at {fps} FPS reference: {output_dir}")
     
-    # Generate PNG frames - each frame shows accumulated scan lines up to that point
-    for frame_idx in range(len(significant_rows)):
-        # Create accumulated strip image up to current frame
-        accumulated_rows = significant_rows[:frame_idx + 1]
+    # Generate PNG frames with parallel writing
+    if parallel and len(significant_rows) > 50:
+        print("Generating PNG frames in parallel...")
         
-        # Convert to numpy array and create the frame
-        strip_frame_bgr = np.stack(accumulated_rows, axis=0)
+        # Use batched approach for better memory efficiency and parallelization
+        # Keep batch size reasonable to avoid memory issues with large datasets
+        batch_size = min(100, max(50, len(significant_rows) // (num_workers or mp.cpu_count()) // 4))
+        batches = []
         
-        # Rotate counter-clockwise 90 degrees to match image mode orientation
-        strip_frame_bgr = cv2.rotate(strip_frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        for start_idx in range(0, len(significant_rows), batch_size):
+            end_idx = min(start_idx + batch_size, len(significant_rows))
+            batches.append((significant_rows, output_dir, start_idx, end_idx,
+                          (final_output_height, final_output_width), timestamp, 'row'))
         
-        # Flip horizontally so time flows from right to left (strip photography convention)
-        strip_frame_bgr = cv2.flip(strip_frame_bgr, 1)
+        print(f"Processing {len(batches)} batches of ~{batch_size} frames each")
         
-        # Create BGRA frame with alpha channel
-        current_height, current_width = strip_frame_bgr.shape[:2]
-        strip_frame_bgra = np.zeros((final_output_height, final_output_width, 4), dtype=np.uint8)
+        # Process batches in parallel
+        with ProcessPoolExecutor(max_workers=min(num_workers or mp.cpu_count(), len(batches))) as executor:
+            batch_results = list(tqdm(
+                executor.map(prepare_and_write_png_batch, batches),
+                total=len(batches),
+                desc="Writing PNG batches",
+                unit="batch"
+            ))
         
-        # Copy RGB data to BGR channels and set alpha to 255 for actual content
-        # Place content on the right side for progressive growth from right to left
-        strip_frame_bgra[:current_height, final_output_width-current_width:, :3] = strip_frame_bgr
-        strip_frame_bgra[:current_height, final_output_width-current_width:, 3] = 255  # Opaque for content
-        # Transparent areas remain alpha=0
+        # Flatten results
+        total_frames = sum(len(batch_result) for batch_result in batch_results)
+        print(f"Generated {total_frames} PNG frames in parallel")
         
-        # Add timestamp overlay if requested (after alpha setup)
-        if timestamp:
-            # Convert back to BGR for timestamp overlay, then back to BGRA
-            bgr_for_timestamp = strip_frame_bgra[:, :, :3].copy()
-            bgr_with_timestamp = add_timestamp_overlay(bgr_for_timestamp, frame_idx + 1, len(significant_rows))
-            strip_frame_bgra[:, :, :3] = bgr_with_timestamp
-        
-        # Save PNG frame with zero-padded frame number
-        frame_filename = f"frame_{frame_idx:06d}.png"
-        frame_path = output_dir / frame_filename
-        cv2.imwrite(str(frame_path), strip_frame_bgra)
-        
-        if (frame_idx + 1) % 100 == 0:
-            print(f"Generated {frame_idx + 1}/{len(significant_rows)} PNG frames")
+    else:
+        # Sequential PNG generation for small frame counts
+        print("Generating PNG frames sequentially...")
+        for frame_idx in tqdm(range(len(significant_rows)), desc="Writing PNG frames", unit="frame"):
+            # Create accumulated strip image up to current frame
+            accumulated_rows = significant_rows[:frame_idx + 1]
+            
+            # Convert to numpy array and create the frame
+            strip_frame_bgr = np.stack(accumulated_rows, axis=0)
+            
+            # Rotate counter-clockwise 90 degrees to match image mode orientation
+            strip_frame_bgr = cv2.rotate(strip_frame_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
+            # Flip horizontally so time flows from right to left
+            strip_frame_bgr = cv2.flip(strip_frame_bgr, 1)
+            
+            # Create BGRA frame with alpha channel
+            current_height, current_width = strip_frame_bgr.shape[:2]
+            strip_frame_bgra = np.zeros((final_output_height, final_output_width, 4), dtype=np.uint8)
+            
+            # Copy RGB data to BGR channels and set alpha to 255 for actual content
+            strip_frame_bgra[:current_height, final_output_width-current_width:, :3] = strip_frame_bgr
+            strip_frame_bgra[:current_height, final_output_width-current_width:, 3] = 255
+            
+            # Add timestamp overlay if requested
+            if timestamp:
+                bgr_for_timestamp = strip_frame_bgra[:, :, :3].copy()
+                bgr_with_timestamp = add_timestamp_overlay(bgr_for_timestamp, frame_idx + 1, len(significant_rows))
+                strip_frame_bgra[:, :, :3] = bgr_with_timestamp
+            
+            # Save PNG frame
+            frame_filename = f"frame_{frame_idx:06d}.png"
+            frame_path = output_dir / frame_filename
+            
+            # Add error handling for sequential writes too
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    success = cv2.imwrite(str(frame_path), strip_frame_bgra)
+                    if success:
+                        break
+                    else:
+                        if attempt < max_retries - 1:
+                            import time
+                            time.sleep(0.1 * (attempt + 1))
+                            continue
+                        else:
+                            print(f"Warning: Failed to write frame {frame_idx} after {max_retries} attempts")
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    else:
+                        print(f"Error writing frame {frame_idx}: {e}")
+            
+            if (frame_idx + 1) % 100 == 0:
+                print(f"Generated {frame_idx + 1}/{len(significant_rows)} PNG frames")
     
     print(f"PNG sequence saved to: {output_dir}")
     print(f"Sequence contains {len(significant_rows)} frames at {fps} FPS reference")
@@ -1278,6 +1710,25 @@ def main():
         help="Generate PNG sequence with alpha transparency for video editing (video mode only)"
     )
     
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        default=True,
+        help="Use parallel processing for better performance (default: True)"
+    )
+    
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable parallel processing (use sequential processing)"
+    )
+    
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="Number of worker processes for parallel processing (default: auto-detect)"
+    )
+    
     args = parser.parse_args()
     
     # Validate input file
@@ -1335,6 +1786,15 @@ def main():
     # Validate FPS
     if args.fps <= 0:
         print("Error: --fps must be positive")
+        sys.exit(1)
+    
+    # Handle parallel processing arguments
+    if args.no_parallel:
+        args.parallel = False
+    
+    # Validate workers
+    if args.workers is not None and args.workers <= 0:
+        print("Error: --workers must be positive")
         sys.exit(1)
     
     # Generate output path
@@ -1400,11 +1860,11 @@ def main():
             if args.xcolumn is not None:
                 print(f"Column mode: Extracting vertical line at x={args.xcolumn}")
                 extract_column_strip_alpha(video_path, args.xcolumn, output_path, args.threshold, args.relax,
-                                         args.start, args.end, args.fps, args.timestamp)
+                                         args.start, args.end, args.fps, args.timestamp, args.parallel, args.workers)
             else:
                 print(f"Row mode: Extracting horizontal line at y={args.yrow}")
                 extract_row_strip_alpha(video_path, args.yrow, output_path, args.threshold, args.relax,
-                                      args.start, args.end, args.fps, args.timestamp)
+                                      args.start, args.end, args.fps, args.timestamp, args.parallel, args.workers)
             
             print("Alpha PNG sequence generation completed successfully!")
         elif args.video:
