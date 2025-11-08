@@ -30,6 +30,12 @@ uv run main.py .\line500fps32pix.mp4 --relax 5
 uv run main.py .\line500fps32pix.mp4 --relax
 ```
 
+**Video Mode** - Generate MJPEG video showing accumulated scan lines over time:
+```bash
+uv run main.py .\line500fps32pix.mp4 --video --fps 30
+```
+Output: `results/video/line500fps32pix_a3f2_t0_01_fps30_0.avi`
+
 **Debug Mode** - Analyze changes and generate threshold recommendations:
 ```bash
 uv run main.py .\line500fps32pix.mp4 --debug
@@ -60,10 +66,20 @@ uv sync
 - `--threshold N` - Change threshold 0-1 for frame inclusion (default: 0.01)
 - `--relax [N]` - Include N extra frames before/after threshold frames (default: 0, or 100 if flag used without value)
 - `--debug` - Analyze changes without creating strip image, outputs to `results/debug/`
+- `--video` - Generate MJPEG video showing accumulated scan lines over time
+- `--fps N` - Output video frame rate (default: 30.0, only used with `--video`)
+- `--timeline` - Overlay frame numbers as timeline/ruler on output image (image mode only)
+- `--start N` - Start frame number (0-based, default: 0)
+- `--end N` - End frame number (0-based, default: last frame)
 
 ### Output Modes
-- **Column mode**: Extracts vertical line (`--xcolumn`) → Width = frames, Height = video height
-- **Row mode**: Extracts horizontal line (`--yrow`, **default**) → Rotated 90° CW for proper orientation
+- **Image mode** (default): Creates static strip photography image
+  - **Column mode**: Extracts vertical line (`--xcolumn`) → Width = frames, Height = video height
+  - **Row mode**: Extracts horizontal line (`--yrow`, **default**) → Rotated 90° CW for proper orientation
+- **Video mode** (`--video`): Creates MJPEG video showing scan line accumulation over time
+  - Each frame shows accumulated scan lines up to that point in time
+  - Final frame shows complete strip photography image
+  - Video dimensions automatically determined by input video and number of significant frames
 
 ## Features
 
@@ -88,5 +104,14 @@ uv sync
 - `0.02+`: Low sensitivity (70%+ compression)
 
 **Output Organization**:
-- Normal mode: `results/` folder
+- Image mode: `results/` folder
+- Video mode: `results/video/` folder
 - Debug mode: `results/debug/` folder
+
+**Video Mode Features**:
+- Creates MJPEG AVI files showing scan line accumulation over time
+- Each video frame shows the progressive build-up of the strip photography effect
+- Configurable frame rate with `--fps` parameter
+- Video dimensions automatically calculated based on input video and scan line count
+- Compatible with both row and column extraction modes
+- Timeline overlay not supported in video mode (use image mode with `--timeline` instead)

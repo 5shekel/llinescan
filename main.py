@@ -475,6 +475,311 @@ def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01, rel
     cv2.imwrite(str(output_path), strip_image)
 
 
+def extract_column_strip_video(video_path, x_column, output_path, change_threshold=0.005, relax=0, start_frame=0, end_frame=None, fps=30):
+    """
+    Extract vertical strip at x_column from each frame and create an MJPEG video.
+    Each frame of the output video shows the accumulated scan lines up to that point.
+    
+    Args:
+        video_path: Path to input video file
+        x_column: X-coordinate of the column to extract
+        output_path: Path for output video file
+        change_threshold: Minimum change threshold (0-1) to include frame
+        relax: Number of extra frames to include before/after threshold frames
+        start_frame: First frame to process (0-based)
+        end_frame: Last frame to process (None = until end)
+        fps: Output video frame rate
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+    
+    # Get video properties
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    if x_column >= frame_width:
+        raise ValueError(f"Column {x_column} is outside video width ({frame_width})")
+    
+    # Set end frame if not specified
+    if end_frame is None:
+        end_frame = total_frames - 1
+    
+    print(f"Processing frames {start_frame} to {end_frame} ({end_frame - start_frame + 1} frames)...")
+    print(f"Extracting column {x_column} from {frame_width}x{frame_height} frames")
+    print(f"Change threshold: {change_threshold}")
+    if relax > 0:
+        print(f"Relax: including {relax} frames before/after threshold frames")
+    
+    # First pass: collect all columns and identify significant frames
+    all_columns = []
+    changes = []
+    frame_numbers = []
+    previous_column = None
+    
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Skip frames before start
+        if frame_idx < start_frame:
+            frame_idx += 1
+            continue
+        
+        # Stop after end frame
+        if frame_idx > end_frame:
+            break
+            
+        # Extract current column
+        current_column = frame[:, x_column, :].copy()
+        all_columns.append(current_column)
+        frame_numbers.append(frame_idx)
+        
+        # Calculate change from previous frame
+        if previous_column is not None:
+            change = calculate_line_difference(current_column, previous_column)
+            changes.append(change)
+        else:
+            changes.append(0)  # First frame has no change
+        
+        previous_column = current_column
+        frame_idx += 1
+        
+        if (frame_idx - start_frame) % 100 == 0:
+            print(f"Processed {frame_idx - start_frame}/{end_frame - start_frame + 1} frames")
+    
+    cap.release()
+    
+    # Second pass: determine which frames to include
+    include_mask = [False] * len(all_columns)
+    
+    for i, change in enumerate(changes):
+        if i == 0 or change >= change_threshold:
+            # Mark this frame and surrounding frames
+            start = max(0, i - relax)
+            end = min(len(all_columns), i + relax + 1)
+            for j in range(start, end):
+                include_mask[j] = True
+    
+    # Collect significant columns
+    significant_columns = []
+    significant_frame_numbers = []
+    for i, col in enumerate(all_columns):
+        if include_mask[i]:
+            significant_columns.append(col)
+            significant_frame_numbers.append(frame_numbers[i])
+    
+    included_frames = sum(include_mask)
+    skipped_frames = len(all_columns) - included_frames
+    
+    if not significant_columns:
+        raise ValueError("No significant changes detected. Try lowering the threshold.")
+    
+    print(f"Original frames in segment: {len(all_columns)}")
+    print(f"Included frames: {included_frames}")
+    print(f"Skipped frames: {skipped_frames}")
+    print(f"Compression ratio: {skipped_frames/len(all_columns):.1%}")
+    
+    # Create video writer
+    # Output video dimensions: height = input frame height, width = number of significant frames
+    output_width = len(significant_columns)
+    output_height = frame_height
+    
+    print(f"Output video dimensions: {output_width}x{output_height}")
+    print(f"Creating MJPEG video at {fps} FPS: {output_path}")
+    
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (output_width, output_height))
+    
+    if not out.isOpened():
+        raise ValueError(f"Could not create video writer for: {output_path}")
+    
+    # Generate video frames - each frame shows accumulated scan lines up to that point
+    for frame_idx in range(len(significant_columns)):
+        # Create accumulated strip image up to current frame
+        accumulated_columns = significant_columns[:frame_idx + 1]
+        
+        # If we have fewer columns than the final width, pad with the last column
+        while len(accumulated_columns) < output_width:
+            accumulated_columns.append(accumulated_columns[-1])
+        
+        # Convert to numpy array and create the frame
+        strip_frame = np.stack(accumulated_columns, axis=1)
+        
+        # Write frame to video
+        out.write(strip_frame)
+        
+        if (frame_idx + 1) % 100 == 0:
+            print(f"Generated {frame_idx + 1}/{len(significant_columns)} video frames")
+    
+    # Release video writer
+    out.release()
+    
+    print(f"MJPEG video saved to: {output_path}")
+    print(f"Video contains {len(significant_columns)} frames at {fps} FPS")
+    print(f"Total duration: {len(significant_columns)/fps:.2f} seconds")
+
+
+def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.01, relax=0, start_frame=0, end_frame=None, fps=30):
+    """
+    Extract horizontal strip at y_row from each frame and create an MJPEG video.
+    Each frame of the output video shows the accumulated scan lines up to that point.
+    
+    Args:
+        video_path: Path to input video file
+        y_row: Y-coordinate of the row to extract
+        output_path: Path for output video file
+        change_threshold: Minimum change threshold (0-1) to include frame
+        relax: Number of extra frames to include before/after threshold frames
+        start_frame: First frame to process (0-based)
+        end_frame: Last frame to process (None = until end)
+        fps: Output video frame rate
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+    
+    # Get video properties
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    if y_row >= frame_height:
+        raise ValueError(f"Row {y_row} is outside video height ({frame_height})")
+    
+    # Set end frame if not specified
+    if end_frame is None:
+        end_frame = total_frames - 1
+    
+    print(f"Processing frames {start_frame} to {end_frame} ({end_frame - start_frame + 1} frames)...")
+    print(f"Extracting row {y_row} from {frame_width}x{frame_height} frames")
+    print(f"Change threshold: {change_threshold}")
+    if relax > 0:
+        print(f"Relax: including {relax} frames before/after threshold frames")
+    
+    # First pass: collect all rows and identify significant frames
+    all_rows = []
+    changes = []
+    frame_numbers = []
+    previous_row = None
+    
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Skip frames before start
+        if frame_idx < start_frame:
+            frame_idx += 1
+            continue
+        
+        # Stop after end frame
+        if frame_idx > end_frame:
+            break
+            
+        # Extract current row
+        current_row = frame[y_row, :, :].copy()
+        all_rows.append(current_row)
+        frame_numbers.append(frame_idx)
+        
+        # Calculate change from previous frame
+        if previous_row is not None:
+            change = calculate_line_difference(current_row, previous_row)
+            changes.append(change)
+        else:
+            changes.append(0)  # First frame has no change
+        
+        previous_row = current_row
+        frame_idx += 1
+        
+        if (frame_idx - start_frame) % 100 == 0:
+            print(f"Processed {frame_idx - start_frame}/{end_frame - start_frame + 1} frames")
+    
+    cap.release()
+    
+    # Second pass: determine which frames to include
+    include_mask = [False] * len(all_rows)
+    
+    for i, change in enumerate(changes):
+        if i == 0 or change >= change_threshold:
+            # Mark this frame and surrounding frames
+            start = max(0, i - relax)
+            end = min(len(all_rows), i + relax + 1)
+            for j in range(start, end):
+                include_mask[j] = True
+    
+    # Collect significant rows
+    significant_rows = []
+    significant_frame_numbers = []
+    for i, row in enumerate(all_rows):
+        if include_mask[i]:
+            significant_rows.append(row)
+            significant_frame_numbers.append(frame_numbers[i])
+    
+    included_frames = sum(include_mask)
+    skipped_frames = len(all_rows) - included_frames
+    
+    if not significant_rows:
+        raise ValueError("No significant changes detected. Try lowering the threshold.")
+    
+    print(f"Original frames in segment: {len(all_rows)}")
+    print(f"Included frames: {included_frames}")
+    print(f"Skipped frames: {skipped_frames}")
+    print(f"Compression ratio: {skipped_frames/len(all_rows):.1%}")
+    
+    # Create video writer
+    # For row mode, we rotate CCW 90°: output video dimensions after rotation
+    # Before rotation: height = number of significant frames, width = input frame width
+    # After rotation: height = input frame width, width = number of significant frames
+    output_width = len(significant_rows)  # After rotation
+    output_height = frame_width  # After rotation
+    
+    print(f"Output video dimensions (after rotation): {output_width}x{output_height}")
+    print(f"Creating MJPEG video at {fps} FPS: {output_path}")
+    
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    out = cv2.VideoWriter(str(output_path), fourcc, fps, (output_width, output_height))
+    
+    if not out.isOpened():
+        raise ValueError(f"Could not create video writer for: {output_path}")
+    
+    # Generate video frames - each frame shows accumulated scan lines up to that point
+    for frame_idx in range(len(significant_rows)):
+        # Create accumulated strip image up to current frame
+        accumulated_rows = significant_rows[:frame_idx + 1]
+        
+        # If we have fewer rows than the final height, pad with the last row
+        while len(accumulated_rows) < output_height:
+            accumulated_rows.append(accumulated_rows[-1])
+        
+        # Convert to numpy array and create the frame
+        strip_frame = np.stack(accumulated_rows, axis=0)
+        
+        # Rotate counter-clockwise 90 degrees to match image mode orientation
+        strip_frame = cv2.rotate(strip_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        
+        # Write frame to video
+        out.write(strip_frame)
+        
+        if (frame_idx + 1) % 100 == 0:
+            print(f"Generated {frame_idx + 1}/{len(significant_rows)} video frames")
+    
+    # Release video writer
+    out.release()
+    
+    print(f"MJPEG video saved to: {output_path}")
+    print(f"Video contains {len(significant_rows)} frames at {fps} FPS")
+    print(f"Total duration: {len(significant_rows)/fps:.2f} seconds")
+
+
 def main():
     """Main entry point for the strip photography tool."""
     parser = argparse.ArgumentParser(
@@ -500,7 +805,7 @@ def main():
     
     parser.add_argument(
         "--output",
-        help="Output image file path (default: results/<input_name>.jpg)"
+        help="Output file path (default: results/<input_name>.jpg for images, .avi for videos)"
     )
     
     parser.add_argument(
@@ -535,13 +840,26 @@ def main():
     parser.add_argument(
         "--timeline",
         action="store_true",
-        help="Overlay frame numbers as timeline/ruler on output image"
+        help="Overlay frame numbers as timeline/ruler on output image (image mode only)"
     )
     
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Debug mode: analyze changes and generate threshold graph without creating strip image"
+    )
+    
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Generate MJPEG video showing accumulated scan lines over time"
+    )
+    
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=30.0,
+        help="Output video frame rate (default: 30.0, only used with --video)"
     )
     
     args = parser.parse_args()
@@ -585,17 +903,37 @@ def main():
         print("Error: --end must be greater than or equal to --start")
         sys.exit(1)
     
+    # Validate video mode arguments
+    if args.video and args.timeline:
+        print("Warning: --timeline is not supported in video mode, ignoring")
+        args.timeline = False
+    
+    if args.video and args.debug:
+        print("Error: Cannot use --video and --debug modes together")
+        sys.exit(1)
+    
+    # Validate FPS
+    if args.fps <= 0:
+        print("Error: --fps must be positive")
+        sys.exit(1)
+    
     # Generate output path
     if args.output:
         output_path = Path(args.output)
-        # Add .jpg extension if no extension provided
+        # Add appropriate extension if no extension provided
         if not output_path.suffix:
-            output_path = output_path.with_suffix('.jpg')
-            print(f"No extension specified, using: {output_path}")
+            if args.video:
+                output_path = output_path.with_suffix('.avi')
+                print(f"No extension specified for video mode, using: {output_path}")
+            else:
+                output_path = output_path.with_suffix('.jpg')
+                print(f"No extension specified for image mode, using: {output_path}")
     else:
         # Auto-generate output path in results folder with UUID
         if args.debug:
             results_dir = Path("results/debug")
+        elif args.video:
+            results_dir = Path("results/video")
         else:
             results_dir = Path("results")
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -603,7 +941,13 @@ def main():
         uuid_prefix = uuid.uuid4().hex[:4]
         # Include threshold in filename
         threshold_str = f"t{args.threshold}".replace(".", "_")
-        output_filename = f"{video_path.stem}_{uuid_prefix}_{threshold_str}.jpg"
+        
+        if args.video:
+            fps_str = f"fps{args.fps}".replace(".", "_")
+            output_filename = f"{video_path.stem}_{uuid_prefix}_{threshold_str}_{fps_str}.avi"
+        else:
+            output_filename = f"{video_path.stem}_{uuid_prefix}_{threshold_str}.jpg"
+        
         output_path = results_dir / output_filename
         print(f"No output specified, using: {output_path}")
     
@@ -622,8 +966,24 @@ def main():
                                    start_frame=args.start, end_frame=args.end)
             
             print("Change analysis completed successfully!")
+        elif args.video:
+            # Video mode: create MJPEG video with accumulated scan lines
+            print("Video mode: Creating MJPEG video with accumulated scan lines")
+            
+            if args.xcolumn is not None:
+                print(f"Column mode: Extracting vertical line at x={args.xcolumn}")
+                extract_column_strip_video(video_path, args.xcolumn, output_path, args.threshold, args.relax,
+                                         args.start, args.end, args.fps)
+            else:
+                print(f"Row mode: Extracting horizontal line at y={args.yrow}")
+                extract_row_strip_video(video_path, args.yrow, output_path, args.threshold, args.relax,
+                                      args.start, args.end, args.fps)
+            
+            print("MJPEG video generation completed successfully!")
         else:
-            # Normal mode: extract strip photography
+            # Normal mode: extract strip photography image
+            print("Image mode: Creating strip photography image")
+            
             if args.xcolumn is not None:
                 print(f"Column mode: Extracting vertical line at x={args.xcolumn}")
                 extract_column_strip(video_path, args.xcolumn, output_path, args.threshold, args.relax, args.timeline,
