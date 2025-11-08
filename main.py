@@ -475,7 +475,49 @@ def extract_row_strip(video_path, y_row, output_path, change_threshold=0.01, rel
     cv2.imwrite(str(output_path), strip_image)
 
 
-def extract_column_strip_video(video_path, x_column, output_path, change_threshold=0.005, relax=0, start_frame=0, end_frame=None, fps=30):
+def add_timestamp_overlay(frame, frame_count, total_frames):
+    """
+    Add frame count overlay to the bottom left corner of the frame.
+    
+    Args:
+        frame: The video frame to add overlay to
+        frame_count: Current frame number (1-based)
+        total_frames: Total number of frames
+        
+    Returns:
+        Frame with timestamp overlay
+    """
+    overlay = frame.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.2
+    font_thickness = 2
+    text_color = (0, 255, 255)  # Yellow for visibility
+    bg_color = (0, 0, 0)  # Black background
+    
+    # Create timestamp text
+    timestamp_text = f"Frame: {frame_count}/{total_frames}"
+    
+    # Get text size for background rectangle
+    (text_width, text_height), baseline = cv2.getTextSize(timestamp_text, font, font_scale, font_thickness)
+    
+    # Position at bottom left with some padding
+    x_pos = 10
+    y_pos = frame.shape[0] - 10  # Bottom of frame minus padding
+    
+    # Draw background rectangle
+    cv2.rectangle(overlay,
+                 (x_pos - 5, y_pos - text_height - baseline - 5),
+                 (x_pos + text_width + 5, y_pos + baseline + 5),
+                 bg_color, -1)
+    
+    # Draw text
+    cv2.putText(overlay, timestamp_text, (x_pos, y_pos - baseline),
+               font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+    
+    return overlay
+
+
+def extract_column_strip_video(video_path, x_column, output_path, change_threshold=0.005, relax=0, start_frame=0, end_frame=None, fps=30, timestamp=False):
     """
     Extract vertical strip at x_column from each frame and create an MJPEG video.
     Each frame of the output video shows the accumulated scan lines up to that point.
@@ -489,6 +531,7 @@ def extract_column_strip_video(video_path, x_column, output_path, change_thresho
         start_frame: First frame to process (0-based)
         end_frame: Last frame to process (None = until end)
         fps: Output video frame rate
+        timestamp: If True, embed frame count on bottom left corner
     """
     cap = cv2.VideoCapture(str(video_path))
     
@@ -611,6 +654,10 @@ def extract_column_strip_video(video_path, x_column, output_path, change_thresho
         # Convert to numpy array and create the frame
         strip_frame = np.stack(accumulated_columns, axis=1)
         
+        # Add timestamp overlay if requested
+        if timestamp:
+            strip_frame = add_timestamp_overlay(strip_frame, frame_idx + 1, len(significant_columns))
+        
         # Write frame to video
         out.write(strip_frame)
         
@@ -625,7 +672,7 @@ def extract_column_strip_video(video_path, x_column, output_path, change_thresho
     print(f"Total duration: {len(significant_columns)/fps:.2f} seconds")
 
 
-def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.01, relax=0, start_frame=0, end_frame=None, fps=30):
+def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.01, relax=0, start_frame=0, end_frame=None, fps=30, timestamp=False):
     """
     Extract horizontal strip at y_row from each frame and create an MJPEG video.
     Each frame of the output video shows the accumulated scan lines up to that point.
@@ -639,6 +686,7 @@ def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.0
         start_frame: First frame to process (0-based)
         end_frame: Last frame to process (None = until end)
         fps: Output video frame rate
+        timestamp: If True, embed frame count on bottom left corner
     """
     cap = cv2.VideoCapture(str(video_path))
     
@@ -766,6 +814,10 @@ def extract_row_strip_video(video_path, y_row, output_path, change_threshold=0.0
         # Rotate counter-clockwise 90 degrees to match image mode orientation
         strip_frame = cv2.rotate(strip_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
+        # Add timestamp overlay if requested (after rotation)
+        if timestamp:
+            strip_frame = add_timestamp_overlay(strip_frame, frame_idx + 1, len(significant_rows))
+        
         # Write frame to video
         out.write(strip_frame)
         
@@ -860,6 +912,13 @@ def main():
         type=float,
         default=30.0,
         help="Output video frame rate (default: 30.0, only used with --video)"
+    )
+    
+    parser.add_argument(
+        "--timestamp",
+        "--ts",
+        action="store_true",
+        help="Embed frame count on bottom left corner (video mode only)"
     )
     
     args = parser.parse_args()
@@ -973,11 +1032,11 @@ def main():
             if args.xcolumn is not None:
                 print(f"Column mode: Extracting vertical line at x={args.xcolumn}")
                 extract_column_strip_video(video_path, args.xcolumn, output_path, args.threshold, args.relax,
-                                         args.start, args.end, args.fps)
+                                         args.start, args.end, args.fps, args.timestamp)
             else:
                 print(f"Row mode: Extracting horizontal line at y={args.yrow}")
                 extract_row_strip_video(video_path, args.yrow, output_path, args.threshold, args.relax,
-                                      args.start, args.end, args.fps)
+                                      args.start, args.end, args.fps, args.timestamp)
             
             print("MJPEG video generation completed successfully!")
         else:

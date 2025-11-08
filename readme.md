@@ -36,6 +36,11 @@ uv run main.py .\line500fps32pix.mp4 --video --fps 30
 ```
 Output: `results/video/line500fps32pix_a3f2_t0_01_fps30_0.avi`
 
+**Video with Timestamp** - Add frame count overlay to video:
+```bash
+uv run main.py .\line500fps32pix.mp4 --video --fps 30 --timestamp
+```
+
 **Debug Mode** - Analyze changes and generate threshold recommendations:
 ```bash
 uv run main.py .\line500fps32pix.mp4 --debug
@@ -68,6 +73,7 @@ uv sync
 - `--debug` - Analyze changes without creating strip image, outputs to `results/debug/`
 - `--video` - Generate MJPEG video showing accumulated scan lines over time
 - `--fps N` - Output video frame rate (default: 30.0, only used with `--video`)
+- `--timestamp` / `--ts` - Embed frame count on bottom left corner (video mode only)
 - `--timeline` - Overlay frame numbers as timeline/ruler on output image (image mode only)
 - `--start N` - Start frame number (0-based, default: 0)
 - `--end N` - End frame number (0-based, default: last frame)
@@ -112,6 +118,7 @@ uv sync
 - Creates MJPEG AVI files showing scan line accumulation over time
 - Each video frame shows the progressive build-up of the strip photography effect
 - Configurable frame rate with `--fps` parameter
+- Optional timestamp overlay with `--timestamp` / `--ts` showing frame count in bottom left corner
 - Video dimensions automatically calculated based on input video and scan line count
 - Compatible with both row and column extraction modes
 - Timeline overlay not supported in video mode (use image mode with `--timeline` instead)
