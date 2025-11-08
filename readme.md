@@ -41,6 +41,12 @@ Output: `results/video/line500fps32pix_a3f2_t0_01_fps30_0.avi`
 uv run main.py .\line500fps32pix.mp4 --video --fps 30 --timestamp
 ```
 
+**Alpha Video Mode** - Generate PNG sequence with transparency for video editing:
+```bash
+uv run main.py .\line500fps32pix.mp4 --video --alpha --fps 30 --timestamp
+```
+Output: `results/video/line500fps32pix_a3f2_t0_01_fps30_0_alpha/` (directory with PNG sequence)
+
 **Debug Mode** - Analyze changes and generate threshold recommendations:
 ```bash
 uv run main.py .\line500fps32pix.mp4 --debug
@@ -73,6 +79,7 @@ uv sync
 - `--debug` - Analyze changes without creating strip image, outputs to `results/debug/`
 - `--video` - Generate MJPEG video showing accumulated scan lines over time
 - `--fps N` - Output video frame rate (default: 30.0, only used with `--video`)
+- `--alpha` - Generate PNG sequence with alpha transparency for video editing (video mode only)
 - `--timestamp` / `--ts` - Embed frame count on bottom left corner (video mode only)
 - `--timeline` - Overlay frame numbers as timeline/ruler on output image (image mode only)
 - `--start N` - Start frame number (0-based, default: 0)
@@ -86,6 +93,11 @@ uv sync
   - Each frame shows accumulated scan lines up to that point in time
   - Final frame shows complete strip photography image
   - Video dimensions automatically determined by input video and number of significant frames
+- **Alpha video mode** (`--video --alpha`): Creates PNG sequence with alpha transparency
+  - Perfect for video editing with transparent backgrounds instead of black padding
+  - Each PNG frame shows progressive scan line accumulation with alpha channel
+  - Import as PNG sequence in video editors at specified FPS
+  - No keyframe compression - ideal for editing workflows
 
 ## Features
 
@@ -122,3 +134,12 @@ uv sync
 - Video dimensions automatically calculated based on input video and scan line count
 - Compatible with both row and column extraction modes
 - Timeline overlay not supported in video mode (use image mode with `--timeline` instead)
+
+**Alpha Video Mode Features**:
+- Creates PNG sequence with BGRA (alpha channel) for video editing
+- Transparent background instead of black padding - perfect for compositing
+- No keyframe compression - each PNG is independent for smooth editing
+- Progressive scan line accumulation with alpha transparency
+- Import into video editors as PNG sequence at specified FPS
+- Ideal for professional video editing workflows requiring transparency
+- Compatible with all major video editors (Premiere, Final Cut, DaVinci Resolve, etc.)
